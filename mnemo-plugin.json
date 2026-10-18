@@ -1,0 +1,25 @@
+{
+    "name":  "@splitshift/app",
+    "displayName":  "SplitShift",
+    "version":  "1.0.0",
+    "description":  "Multi-client and project time tracking with rates, reports, and CSV export.",
+    "permissions":  [
+                        "dialog:open",
+                        "vault:write"
+                    ],
+    "updateStrategy":  "git",
+    "entrypoints":  {
+                        "renderer":  "index.html"
+                    },
+    "widgets":  [
+                    {
+                        "id":  "splitshift-main",
+                        "icon":  "🕒",
+                        "name":  "SplitShift",
+                        "route":  "index.html",
+                        "defaultWidth":  900,
+                        "defaultHeight":  700
+                    }
+                ],
+    "icon":  "icon.svg"
+}
