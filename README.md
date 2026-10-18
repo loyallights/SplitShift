@@ -117,10 +117,13 @@ Vite. The development reference is retained for API and permission requirements.
 Before publishing to a store or repository, supply the repository metadata and
 complete the host integration checks described above.
 
-## Sharing this package
-
 Includes the source, build, purple clock artwork, development documentation, and portable checks. It excludes dependency installations, backups, reference downloads, browser storage, and personal session records. Repository metadata uses the public GitHub project URL; no personal email is configured in this package.
 
 ## License and attribution
 
 MIT. See LICENSE and THIRD_PARTY_NOTICES.md. The original Mnemosyne starter copyright notice is retained. This license applies to SplitShift; it does not license the proprietary Mnemosyne desktop application.
+
+## Development acknowledgment
+
+SplitShift was built with assistance from OpenAI Codex for implementation, interface design, debugging, and documentation. Its features and behavior were reviewed and tested by the project maintainer.
+## Sharing this package
