@@ -1,0 +1,400 @@
+# Building a Mnemosyne OS cartridge — agent reference
+
+> For an AI coding agent (Cursor, Claude Code, Copilot, Antigravity, …). Read this
+> **fully** before writing code. It is the authoritative build surface — **do not
+> guess APIs or invent actions.** If a capability is not listed here or in the
+> linked docs, it does not exist. Follow the reference implementation's patterns;
+> do not improvise.
+
+## 0. Pick the right surface first (they are NOT interchangeable)
+
+Mnemosyne OS exposes three ways to build on it. Choose before writing a line.
+
+| You are building… | Surface | Client library | Transport |
+|---|---|---|---|
+| A **UI panel inside the Mnemosyne window** (a cartridge on MnemoHub) | **Cartridge** — *this guide* | `MnemoCartridgeSDK` (`@mnemosyne_os/cartridge-sdk`) | `postMessage`, sandboxed iframe |
+| A **separate program** (Node service, agent, standalone web/desktop app) that talks to the user's memory | **Layer 2 app** | `@mnemosyne_os/sdk` | WebSocket `ws://127.0.0.1:7799` |
+| Letting **an external AI assistant** read/write the vault | **MCP server** | `@mnemosyne_os/mcp` | MCP → 7799 |
+
+Rendering pixels *inside* Mnemosyne → **Cartridge**. A *separate process* → Layer 2 app. An *AI assistant caller* → MCP.
+
+> ⚠️ `MnemoCartridgeSDK` is **not** `@mnemosyne_os/sdk`. Never `npm install
+> @mnemosyne_os/sdk` in a cartridge — that is a different surface (Layer 2, §5).
+
+## 1. Cartridge quickstart
+
+Never start from a blank page:
+
+- **Scaffold:** `npm create @mnemosyne_os/app` — or copy this boilerplate (`examples/cartridge-boilerplate`, the folder this file lives in).
+- **Reference implementation to read first:** [MnemoReader](https://github.com/Mnemosyne-OS/MnemoReader---MnemosyneOS) (a real, shipped cartridge). Match its patterns.
+
+A cartridge is a React/Vite web app loaded in a **sandboxed iframe** inside the host. It has **no** Node, Electron, filesystem, or network-to-host access. It reaches the host **only** through the SDK's `postMessage` bridge.
+
+### Manifest — `mnemo-plugin.json`
+
+```json
+{
+  "name": "@you/my-cartridge",
+  "displayName": "My Cartridge",
+  "version": "0.1.0",
+  "permissions": ["vault:read", "model:infer"],
+  "entrypoints": { "renderer": "index.html" },
+  "widgets": []
+}
+```
+
+- `name` — must match the id you pass to the SDK (below).
+- `permissions[]` — declare **only** what you call (§2). The user grants them at install.
+- `entrypoints.renderer` — a **relative** path (`index.html`), never a dev `localhost` URL.
+
+### Client
+
+```ts
+import { MnemoCartridgeSDK } from './sdk/mnemo-sdk'; // re-exports @mnemosyne_os/cartridge-sdk
+const sdk = new MnemoCartridgeSDK('@you/my-cartridge'); // must equal manifest "name"
+const text = await sdk.invoke('model.infer', { prompt: 'Summarize my week.' });
+```
+
+Every host call is `await sdk.invoke('<action>', payload)`. The complete, authoritative action list is §3.
+
+## 2. Permissions (fine-grained access control)
+
+Permissions are declared in the manifest and granted by the user at install. Each action's required permission is the middle column of the §3 table. Vocabulary:
+
+`vault:read` · `vault:write` · `model:infer` · `dialog:open` · `metrics:read` · `settings:read` · `settings:write` · `scout:run` · `wallet:read` · `net:lan` · `watch:background` · `hermes:control` · `agenda:write` · `gesture:receive` · `license:admin`
+
+- Request the **minimum**. Over-declaring gets a cartridge rejected at review.
+- `license:admin` is founder-only — you will not have it; do not build against it.
+- The last six are narrow and rarely what you want. `wallet:read` reads a
+  credit balance, `net:lan` reads one device on the user's own network,
+  `watch:background` lets the host keep polling your feeds while your window
+  is closed, and `hermes:control` drives a local agent install. `agenda:write`
+  adds appointments to the host calendar (`agenda.add`) so they ring with your
+  window closed; it is add-only and never reads, moves or deletes one.
+  `gesture:receive` lets your window receive the hand gestures the person
+  makes while it is in full screen (`sdk.onGestures`, see below): intentions
+  such as « turn by 12 px », never the camera nor the hand. Declaring one you
+  do not call is over-declaring, and it gets a cartridge rejected.
+- Some actions are **ungated** (no permission) — they are still listed in §3.
+
+### Hand gestures (`gesture:receive`)
+
+A cartridge with its own space (a 3D model, a map, an image you zoom) can
+take the hand gestures of Mnemosyne OS. Declare them in the manifest:
+
+```json
+"permissions": ["gesture:receive"],
+"gestures": { "takes": ["orbit", "depth", "zoom", "recenter"] }
+```
+
+`takes` is a closed list: `orbit` (pinch drag, turn), `pan` (pinch drag,
+move), `depth` (the hand toward or away from the camera), `zoom` (two
+hands), `recenter` (open hands held still), `point` (the index aims: your
+page's px, or null when the aim leaves), `select` (pinch and hold still on a
+point; moving first makes it a drag), `next` / `prev` (an open hand swiped;
+they replace the desktop switch while your app takes them). `orbit` and
+`pan` are the same hand move: take one. `point` and `select` come in your
+page's own pixels: `document.elementFromPoint(x, y)` finds what was aimed.
+Then, in your code:
+
+```ts
+const sub = sdk.onGestures({
+  orbit: ({ dx, dy }) => model.rotate(dx, dy),
+  depth: ({ factor }) => camera.dolly(factor), // > 1 = closer
+  recenter: () => camera.reset(),
+});
+sub.ready.catch((err) => showWhy(err.message)); // refused, or no host
+// on unmount: sub.off();
+```
+
+Your app can also declare its own actions, for what no standard gesture
+covers: `"actions": [{ "id": "explode", "label": { "en": "Exploded view" } }]`
+inside `gestures` (id a-z0-9-, up to 32; up to 8 actions; a label per
+language). Each one appears in the person's « My gestures » under your app's
+name; the person teaches the pose, and you receive `{ kind: 'action', id }`
+on the `action` handler. You never choose the pose.
+
+Gestures arrive only while your window is in full screen. The OS gestures
+(move a window by its corner, full screen, close, the pad) stay with the
+OS. The example is `src/GestureCube.tsx` in this boilerplate.
+
+## 3. Action reference — the only actions that exist
+
+`await sdk.invoke(action, payload)`. This table is generated from the host registry and guarded by a drift test — it cannot lie or lag.
+
+<!-- GENERATED:CARTRIDGE-ACTIONS:START -->
+_185 actions. Generated by `pnpm actions` — do not edit by hand._
+
+| Action | Permission | What it does | Source |
+|---|---|---|---|
+| `agenda.add` | `agenda:write` | A cartridge puts an appointment in the host calendar, so it rings on the canvas even with the cartridge closed (doc 124 §3.3). Its own permission: it WRITES int | `pluginBridgeHandlers.ts` |
+| `app.clone` | `dialog:open` | One-click clone of a GitHub repo into the user's app space, after the cartridge collected explicit user consent in its own UI. The main-side handler (dialog:clo | `pluginCartridgeActions.ts` |
+| `browseModelFile` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `cancelDownload` | `model:infer` |  | `pluginBridgeHandlers.ts` |
+| `catalog.get` | `license:admin` | Signed store catalog (public data) — lets the triage view flag a submission whose appId is ALREADY LIVE as an update of that entry, with the live version next t | `pluginBridgeHandlers.ts` |
+| `catalog.syncVersions` | `license:admin` | Founder-only: re-sign the live catalog with the versions the standalone repos serve at HEAD — what installs actually pull. Version fields of already-listed apps | `pluginBridgeHandlers.ts` |
+| `conversation.delete` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `conversation.get` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `conversation.list` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `conversation.save` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `conversation.vectorize` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `credits.admin.grant` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `credits.admin.list` | `license:admin` | Same trust model as submission review: every call is signed with the sovereign wallet in main and the gate enforces VALIDATOR_WALLETS. | `pluginBridgeHandlers.ts` |
+| `credits.admin.remove` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `credits.admin.update` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `credits.admin.usage` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `credits.audit.list` | `license:admin` | Founder action audit trail (Activity log panel). | `pluginBridgeHandlers.ts` |
+| `credits.balance` | `wallet:read` | Remaining cloud credits, so a cartridge can show what the user has BEFORE spending it. Read-only aggregate: a number and a timestamp, never the wallet address,  | `pluginBridgeHandlers.ts` |
+| `credits.purchases.backfill` | `license:admin` | Rebuild the ledger from Stripe's archive (sales predating the ledger). Bookkeeping only — it grants no credit and mints nothing. | `pluginBridgeHandlers.ts` |
+| `credits.purchases.list` | `license:admin` | Stripe sales ledger — credit AND license purchases. Read-only: the console reports money that already moved, it can never make money move. | `pluginBridgeHandlers.ts` |
+| `credits.requests.list` | `license:admin` | Pending credit requests (users asking the founder for credits) — same license:admin gate; the server re-checks VALIDATOR_WALLETS fail-closed. | `pluginBridgeHandlers.ts` |
+| `credits.requests.resolve` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `credits.status` | `metrics:read` | The USER's own credit balance — read-only, their own wallet, nothing about anyone else (the founder-side ledgers stay behind license:admin). A creation cartridg | `pluginCartridgeActions.ts` |
+| `dialog.deleteFile` | `dialog:open` | Single-file delete, home-scoped and file-only host-side (dialog:deleteFile refuses directories). Cartridges use it for their own artifacts — e.g. BMAD deleting  | `pluginBridgeHandlers.ts` |
+| `dialog.deleteProjectDir` | `dialog:open` | A cartridge may ensure exactly ONE vault: its own walled-off sandbox (doc 58). The app id is the TRUSTED pluginId of the bridge — never the payload — so a cartr | `pluginCartridgeActions.ts` |
+| `dialog.mkdir` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `dialog.openInOS` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `dialog.readDir` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `dialog.readFile` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `dialog.selectFile` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `dialog.selectFolder` | `dialog:open` | `startIn` is a HOME-RELATIVE hint: it decides where the picker opens, and is resolved main-side. The cartridge never receives a path from it — only what the hum | `pluginBridgeHandlers.ts` |
+| `dialog.writeFile` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `downloadModel` | `model:infer` |  | `pluginBridgeHandlers.ts` |
+| `getActiveEmbedModel` | `model:infer` |  | `pluginBridgeHandlers.ts` |
+| `getGlobalConfig` | `settings:read` |  | `pluginBridgeHandlers.ts` |
+| `getStatus` | _(none)_ |  | `pluginBridgeHandlers.ts` |
+| `getSystemMetrics` | `metrics:read` |  | `pluginBridgeHandlers.ts` |
+| `getTopologyMap` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `getWatchedFolders` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `hermes.agentProfileCreate` | `hermes:control` | Create a full second agent via `hermes profile create <name>` — their managed layer owns the scaffolding; we never imitate it. | `pluginHermesActions.ts` |
+| `hermes.agentProfiles` | `hermes:control` | The agent army: default agent + every Hermes profile with its env facts (telegram token present, api port) and gateway-managed flag. | `pluginHermesActions.ts` |
+| `hermes.agentProfileTelegram` | `hermes:control` | Per-profile Telegram keys (validated shapes, backup first). BotFather stays the human's flow — the cockpit guides, takes the token, never pretends to automate T | `pluginHermesActions.ts` |
+| `hermes.applyPreset` | `hermes:control` | Apply a one-click security preset on BOTH sides of the bridge: Hermes' config.yaml (toolsets, approvals.mode, security.tirith_*) and the brain proxy's daily cal | `pluginHermesActions.ts` |
+| `hermes.channels` | `hermes:control` | Messaging-platform census of the local install (.env prefix heuristic; Telegram's exact documented variables). Read-only. | `pluginHermesActions.ts` |
+| `hermes.channelSetTelegram` | `hermes:control` | Write the Telegram bot token / allowed user ids into the install's .env on the human's click — validated shapes only, backup first. | `pluginHermesActions.ts` |
+| `hermes.chat` | `hermes:control` | One chat turn with the local Hermes Agent through its api_server. The conversation is caller-supplied and stateless host-side; auth uses the key from Hermes' ow | `pluginHermesActions.ts` |
+| `hermes.chatStream` | `hermes:control` | The streaming twin of hermes.chat (first consumer of the sdk.stream primitive): the agent's reply fills the bubble token by token instead of arriving buffered.  | `pluginHermesActions.ts` |
+| `hermes.connectors` | `hermes:control` | Data connectors (Apify): linked or not — never the key itself. | `pluginHermesActions.ts` |
+| `hermes.connectorSetApify` | `hermes:control` | Link Apify with the person's own key (their account, their bill), or unlink it with `token: null`. Shape-checked in main, backup first. | `pluginHermesActions.ts` |
+| `hermes.gatewayLogs` | `hermes:control` | The gateway log ring (oldest first) — the honest answer to "I clicked start and nothing happens": the process's own words, crash included. | `pluginHermesActions.ts` |
+| `hermes.gatewayStart` | `hermes:control` | Start a Hermes gateway as a child of Mnemosyne — the human's click, zero terminal. profile '' = the default agent; each profile is its own process with its own  | `pluginHermesActions.ts` |
+| `hermes.gatewayStop` | `hermes:control` | Stop a cockpit-managed gateway (kills that profile's process tree). | `pluginHermesActions.ts` |
+| `hermes.inbox` | `vault:read` | Provenance inbox (doc 58 semantics): list every chronicle the agent wrote through the MCP across active non-MAXIMUM vaults, with the legal move targets. Listing | `pluginHermesActions.ts` |
+| `hermes.inboxMove` | `vault:write` | The human relocated it: re-ingest into the target vault, then forget the source (in that order — a failed ingest never loses the chronicle). | `pluginHermesActions.ts` |
+| `hermes.inboxReject` | `vault:write` | The human's veto: forget an agent-written chronicle from its vault. | `pluginHermesActions.ts` |
+| `hermes.managedInstall` | `hermes:control` | Managed install (doc 123 §4 lot 0): the app fetches the pinned Hermes release, builds its venv on the managed Python and writes the config. One click for every  | `pluginHermesActions.ts` |
+| `hermes.managedInstallCancel` | `hermes:control` |  | `pluginHermesActions.ts` |
+| `hermes.managedInstallStatus` | `hermes:control` |  | `pluginHermesActions.ts` |
+| `hermes.openPath` | `hermes:control` | Open a file the agent produced with the OS default application (the same door the notes use for a pdf or a docx): under the user's home, on the host's safe-exte | `pluginHermesActions.ts` |
+| `hermes.profileGet` | `hermes:control` | Read the agent's USER.md profile — what Hermes injects into its system prompt to know its human. charLimit is Hermes' own injection budget. | `pluginHermesActions.ts` |
+| `hermes.profileSet` | `hermes:control` | Write the reviewed profile (clamped to Hermes' budget, backup first). All three cockpit modes (Mnemosyne pre-fill, questionnaire, import) converge on one human- | `pluginHermesActions.ts` |
+| `hermes.proxyApplyAux` | `hermes:control` | Route Hermes' auxiliary tasks (vision, web summaries, compression, titles, session search) to the brain proxy — Hermes' side quests think with the user's OS too | `pluginHermesActions.ts` |
+| `hermes.proxyApplyConfig` | `hermes:control` | Write the brain block into the local Hermes install's config.yaml — the human's explicit click in the cockpit, with a timestamped backup first. The covenant for | `pluginHermesActions.ts` |
+| `hermes.proxySetConfig` | `hermes:control` | Toggle the brain proxy or adjust its daily call cap (the anti-runaway guard). The toggle is the kill switch — off by default, human-only. | `pluginHermesActions.ts` |
+| `hermes.proxyStatus` | `hermes:control` | Brain proxy (doc 81): status of the loopback endpoint serving Mnemosyne's inference to the local agent — includes the Bearer key (only while enabled) for the co | `pluginHermesActions.ts` |
+| `hermes.readDocument` | `hermes:control` | Read the head of one text document the agent wrote (md, txt, html, json, csv…) for a preview card: `{ path, name, text, truncated }`, text capped at 20 000 char | `pluginHermesActions.ts` |
+| `hermes.readMedia` | `hermes:control` | Read one image the agent produced, by the path its `MEDIA:"<path>"` tag carries, as a data URL the cockpit can draw. Images only (png/jpg/jpeg/gif/ webp/bmp), u | `pluginHermesActions.ts` |
+| `hermes.runApprove` | `hermes:control` |  | `pluginHermesActions.ts` |
+| `hermes.runList` | `hermes:control` |  | `pluginHermesActions.ts` |
+| `hermes.runStart` | `hermes:control` | Tasks with approval (doc 123 lot 1): a run on the gateway's /v1/runs, followed in main; the panel polls runList and answers approvals. | `pluginHermesActions.ts` |
+| `hermes.runStop` | `hermes:control` |  | `pluginHermesActions.ts` |
+| `hermes.searchApply` | `hermes:control` | Route Hermes' web search to Mnemosyne's own SearXNG — the OS's third engine served to the agent (brain, auxiliaries, now search). The error codes name the exact | `pluginHermesActions.ts` |
+| `hermes.searchFreeInstall` | `hermes:control` | The free web search engine (ddgs, no key) into the install's venv. | `pluginHermesActions.ts` |
+| `hermes.searchSetBrave` | `hermes:control` | Write or remove the person's own Brave Search key (.env, backup first). | `pluginHermesActions.ts` |
+| `hermes.searchStatus` | `hermes:control` | Local SearXNG liveness + whether Hermes already routes search to it. | `pluginHermesActions.ts` |
+| `hermes.securityPosture` | `hermes:control` | Current security posture (approvals mode, tirith stance, toolsets shape) matched against the three one-click presets — read-only. | `pluginHermesActions.ts` |
+| `hermes.skillImport` | `hermes:control` | OS folder picker, then a copy under skills/custom/<name>. | `pluginHermesActions.ts` |
+| `hermes.skillInstall` | `hermes:control` | Install a skill through Hermes' own installer (quarantine + scan + trust level): the covenant skill with no identifier, or the identifier the cockpit's "Advance | `pluginHermesActions.ts` |
+| `hermes.skillInstallStatus` | `hermes:control` | The skill install in flight (or the last one): the card polls it for its clock and the installer's lines while the install call is pending. | `pluginHermesActions.ts` |
+| `hermes.skills` | `hermes:control` | Read-only shelf of the local Hermes Agent's skills and tap subscriptions. Removing stays a human gesture in its CLI. | `pluginHermesActions.ts` |
+| `hermes.skillsOpenFolder` | `hermes:control` | The skills folder, opened in the OS file manager (a person's own skills are folders with a SKILL.md, dropped there). | `pluginHermesActions.ts` |
+| `hermes.skillsSetDisabled` | `hermes:control` | The `skills.disabled` list, written whole. | `pluginHermesActions.ts` |
+| `hermes.skillUninstall` | `hermes:control` | Remove a hub-installed or imported skill (never a bundled one). | `pluginHermesActions.ts` |
+| `hermes.status` | `hermes:control` | Mnemosyne OBSERVES the local Hermes Agent install (Nous Research): status of the install and its api_server config. The inbound arrow — a Hermes agent reading O | `pluginHermesActions.ts` |
+| `hermes.toolsets` | `hermes:control` | Per-platform toolsets (config.yaml platform_toolsets) + the vocabulary of individual toolsets, so the cockpit can render a localized editor. | `pluginHermesActions.ts` |
+| `hermes.toolsetsSet` | `hermes:control` | Regenerate the platform_toolsets block on the human's click (backup first). The block is a flat map — wholesale regeneration, idempotent. | `pluginHermesActions.ts` |
+| `hermes.update` | `hermes:control` | Run `hermes update` as a child of Mnemosyne (repairs the embedded runtime — e.g. the SQLite the gateway warns about). Fire; the panel polls updateStatus. The cl | `pluginHermesActions.ts` |
+| `hermes.updateStatus` | `hermes:control` |  | `pluginHermesActions.ts` |
+| `hermes.voiceRoute` | `hermes:control` | Which voice answers on a channel (doc 123, 2026-09-23): what config.yaml says, and whether the voice chosen in Settings › Voice can be used. | `pluginHermesActions.ts` |
+| `hermes.voiceRouteSet` | `hermes:control` |  | `pluginHermesActions.ts` |
+| `hermes.watchAct` | `hermes:control` | Create / remove / pause / resume / run now a watch, or switch keep-awake. Every field is checked again in main; this only shapes the request. | `pluginHermesActions.ts` |
+| `hermes.watches` | `hermes:control` | Nightly watches (2026-10-02): Hermes cron jobs narrowed to web search, their runs priced by the proxy's tagged calls, the search engine Hermes will really call, | `pluginHermesActions.ts` |
+| `hermes.watchReport` | `hermes:control` | One report's text: the latest, or the file the cockpit names. | `pluginHermesActions.ts` |
+| `irinaHealthCheck` | _(none)_ |  | `pluginBridgeHandlers.ts` |
+| `lan.fetch` | `net:lan` | Read ONE device on the user's own network (doc 94). The cartridge id comes from the bridge, never the payload, so an app cannot spend another one's grants; main | `pluginCartridgeActions.ts` |
+| `lan.grants` | `net:lan` | The doors THIS cartridge holds, so it can show them and explain a refusal. Scoped to the caller: an app learns nothing about what any other was given. | `pluginCartridgeActions.ts` |
+| `license.airdrop` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `license.confirmTotp` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `license.offer` | _(none)_ | Open the wallet, where a license is bought or asked for. The cartridge calls it from its own "get a license" button; the host decides what the wallet shows, the | `pluginCartridgeActions.ts` |
+| `license.requests.activate` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `license.requests.dismiss` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `license.requests.list` | `license:admin` | License-request queue (users asking the founder for a gifted license). Same license:admin gate; the gate re-checks VALIDATOR_WALLETS fail-closed. `activate` min | `pluginBridgeHandlers.ts` |
+| `license.setOwnerKey` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `license.setupTotp` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `license.status` | _(none)_ | Whether this install holds an Engramm license, as ONE word: active, inactive or unknown (nobody could check — never read it as a refusal). No wallet, no token,  | `pluginCartridgeActions.ts` |
+| `license.unlock` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `metrics.get` | `metrics:read` |  | `pluginBridgeHandlers.ts` |
+| `mnemosyne.focus` | `vault:read` |  | `pluginCartridgeActions.ts` |
+| `mnemosyne.ingest` | `vault:write` | Write one chronicle into a vault and return its chronicleId. Same pipeline as social.ingest: routePulse, PromptShield, SHA-256 dedup, persistence. (It formerly  | `pluginCartridgeActions.ts` |
+| `mnemosyne.prime` | `vault:read` |  | `pluginCartridgeActions.ts` |
+| `mnemosyne.query` | `vault:read` | Routes cartridge requests to existing preload APIs. query/prime → model.infer \| status → vault.memoryStats focus → vault.scanTree \| ingest → conversation.vect | `pluginCartridgeActions.ts` |
+| `mnemosyne.status` | `vault:read` |  | `pluginCartridgeActions.ts` |
+| `model.getConfig` | `model:infer` |  | `pluginBridgeHandlers.ts` |
+| `model.getInstalled` | `model:infer` |  | `pluginCartridgeActions.ts` |
+| `model.getStatus` | `model:infer` | Read-only visibility into which engines are available, so a cartridge can offer an informed model choice; the selection is applied per call through model.infer' | `pluginCartridgeActions.ts` |
+| `model.infer` | `model:infer` | An inference may have spent cloud credits, so the cached balance is dropped afterwards (win or fail — a failed call can still have been metered). | `pluginBridgeHandlers.ts` |
+| `model.warmLocal` | `model:infer` | Preload a specific local model (spawn worker + load into memory) so a cartridge can surface a load failure — e.g. a model too heavy for the available RAM — BEFO | `pluginCartridgeActions.ts` |
+| `openDirectoryDialog` | `dialog:open` |  | `pluginBridgeHandlers.ts` |
+| `payment.balance` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `payment.exportKey` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `payment.generate` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `payment.reset` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `payment.status` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `permissions.refresh` | _(none)_ | Re-read this cartridge's manifest from disk and REPORT which of the asked permissions it now holds. Enforcement uses the registry built at startup, so a manifes | `pluginCartridgeActions.ts` |
+| `plugins.getInstalled` | `vault:read` |  | `pluginCartridgeActions.ts` |
+| `plugins.getLinkedDev` | `vault:read` | Dev-link bridge (Muse): a builder cartridge scaffolds a REAL cartridge in the user's app space, so it must be able to link that folder and open it in its own Mn | `pluginCartridgeActions.ts` |
+| `plugins.install` | `vault:write` |  | `pluginCartridgeActions.ts` |
+| `plugins.launch` | `vault:read` |  | `pluginCartridgeActions.ts` |
+| `plugins.linkDev` | `vault:write` |  | `pluginCartridgeActions.ts` |
+| `plugins.uninstall` | `vault:write` |  | `pluginCartridgeActions.ts` |
+| `plugins.unlinkDev` | `vault:write` |  | `pluginCartridgeActions.ts` |
+| `reader.downloadUrl` | `vault:read` | Download a remote document (PDF/EPUB/JSON/…) to a managed local file, then the cartridge runs its extract/parse flow on the returned path. Host-side download (E | `pluginReaderActions.ts` |
+| `reader.extractDocument` | `vault:read` | Extract plain text from a PDF/DOCX/text file on disk (path from the OS dialog). Streaming (`sdk.stream`) adds page-by-page OCR progress for THIS file, as `{"pag | `pluginReaderActions.ts` |
+| `reader.ingest` | `vault:write` | Vectorize + archive one chunk of book text into a Library vault (SHA-256 dedup host-side). Tagged with the DOCUMENT spine — book text is not social data, so it  | `pluginReaderActions.ts` |
+| `reader.renderPage` | `vault:read` | Render one page of the original PDF → JPEG (base64) for the reader's side-by-side "compare with the source" view (host-side pypdfium2, one page at a time so eve | `pluginReaderActions.ts` |
+| `reader.ttsSpeak` | `model:infer` | Synthesize one unit of text → raw PCM (base64) the cartridge plays via Web Audio. The cartridge chooses the WORDS, the engine and the pace; the host owns the DE | `pluginReaderActions.ts` |
+| `reader.ttsStatus` | `model:infer` | Is a local neural voice engine installed + licensed? Defaults to the user's own. | `pluginReaderActions.ts` |
+| `reader.ttsVoices` | `model:infer` | Installed Piper voice ids (Piper is the one engine whose voices are downloaded FILES; the cloning engines' voices are language codes, carried by the catalogue). | `pluginReaderActions.ts` |
+| `reader.ttsWarm` | `model:infer` | Preload a neural engine (spawn sidecar + load model) ahead of first synthesis. A cold sidecar is ~30s — warming lets the reader show a loading state. | `pluginReaderActions.ts` |
+| `reader.voiceConfig` | `model:infer` | Resolve the voice a LONG READ speaks with (Settings → Voice), plus the catalogue of installed engines so the cartridge never has to guess what an id means. host | `pluginReaderActions.ts` |
+| `registry.list` | `license:admin` | Reserved-pseudonym registry (alias → wallet) for the Founders Console. Signed with the sovereign wallet in main; the gate enforces VALIDATOR_WALLETS. | `pluginBridgeHandlers.ts` |
+| `saveGlobalConfig` | `settings:write` |  | `pluginBridgeHandlers.ts` |
+| `scout.start` | `scout:run` |  | `pluginBridgeHandlers.ts` |
+| `scout.stop` | `scout:run` |  | `pluginBridgeHandlers.ts` |
+| `sendPulse` | _(none)_ |  | `pluginBridgeHandlers.ts` |
+| `setEmbedModel` | `model:infer` |  | `pluginBridgeHandlers.ts` |
+| `shell.openExternal` | _(none)_ | Open a URL in the OS browser. Sandboxed cartridge iframes have no 'allow-popups', so target="_blank" is blocked — they route external links here instead. The ho | `pluginBridgeHandlers.ts` |
+| `social.fetch` | `vault:read` |  | `pluginCartridgeActions.ts` |
+| `social.ingest` | `vault:write` | Real vault ingest/query + host-side fetch for the multi-network hub. | `pluginCartridgeActions.ts` |
+| `social.query` | `vault:read` |  | `pluginCartridgeActions.ts` |
+| `speech.listenCancel` | `model:infer` | Drop this cartridge's recording without transcribing (the person changed their mind, the panel closed). Releases the device; `{ cancelled }` says whether there  | `pluginReaderActions.ts` |
+| `speech.listenStart` | `model:infer` | Start listening on the HOST's microphone for this cartridge. The frame never touches the device: the host records (the mic light counts it), and the words come  | `pluginReaderActions.ts` |
+| `speech.listenStop` | `model:infer` | Stop this cartridge's recording and transcribe it with the engine Settings › Voice resolves to (local when chosen or when no cloud key exists, else cloud). Retu | `pluginReaderActions.ts` |
+| `speech.status` | `model:infer` | Whether a cartridge can dictate right now: an STT engine the person set up in Settings › Voice (local Whisper or a cloud key), and whether another cartridge alr | `pluginReaderActions.ts` |
+| `spine.llmScan.start` | `vault:write` | Start the LLM spine classifier (Spine Sense) on one vault's unsorted bucket: batched excerpts → the Settings model → existing-taxon assignment or governed creat | `pluginBridgeHandlers.ts` |
+| `spine.llmScan.status` | `vault:read` | Progress snapshot of the running (or last finished) spine scan job. | `pluginBridgeHandlers.ts` |
+| `spine.llmScan.stop` | `vault:write` | Ask the running spine scan to stop after the current batch (resumable later). | `pluginBridgeHandlers.ts` |
+| `state.get` | _(none)_ | Ungated on purpose: this is the cartridge's OWN blob, namespaced by the caller's id and size-capped — the same trust level as the localStorage it backs up, with | `pluginCartridgeActions.ts` |
+| `state.set` | _(none)_ |  | `pluginCartridgeActions.ts` |
+| `stats.downloads` | `license:admin` | Release download counts as GitHub keeps them (per asset, auto-updates included) — the Founders Console's adoption view. Read-only public data, admin-scoped beca | `pluginBridgeHandlers.ts` |
+| `submissions.preflight` | `license:admin` | Static preflight of a submitted repo (download + inspect, never execute). Founders-only; enforcement is main-side (isFounder) in plugins:preflightRepo. | `pluginBridgeHandlers.ts` |
+| `submissions.review.decide` | `license:admin` |  | `pluginBridgeHandlers.ts` |
+| `submissions.review.list` | `license:admin` | Real enforcement is SERVER-side: each call is signed with the sovereign wallet in main and the gate requires VALIDATOR_WALLETS membership — the permission gate  | `pluginBridgeHandlers.ts` |
+| `translator.translate` | `vault:read` | Non-streaming translation: sends text + language pair, returns translated text. | `pluginCartridgeActions.ts` |
+| `updateWatchedFolders` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `vault.create` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `vault.delete` | `vault:write` | Destroy a vault's memory (and, with deleteDocs, its folder). Symmetric with vault.create — a benchmark/sandbox cartridge (MnemoArena) uses it to wipe its own is | `pluginBridgeHandlers.ts` |
+| `vault.getConfig` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `vault.getScannedPapers` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `vault.memoryStats` | _(none)_ |  | `pluginBridgeHandlers.ts` |
+| `vault.reclassify` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `vault.removeDocWatch` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `vault.rescan` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `vault.sandbox.describeTile` | `vault:write` | Declares how the host should render this app's vault tile: an icon and up to 3 metrics ({ label, spine? }) the HOST computes from spine stats — the app never in | `pluginCartridgeActions.ts` |
+| `vault.sandbox.ensure` | `vault:write` |  | `pluginCartridgeActions.ts` |
+| `vault.sandbox.forget` | `vault:write` | Forget rows the app itself wrote in its OWN sandbox — what an app needs to offer "delete this project" without wiping its whole vault. The app id is the TRUSTED | `pluginCartridgeActions.ts` |
+| `vault.sandbox.saveImage` | `vault:write` | Save one PICTURE into this app's own sandbox vault, so DocWatch ingests it and Theia can find it later ("show me the days it snowed"). The caller gives a NAME a | `pluginCartridgeActions.ts` |
+| `vault.scanTree` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `vault.setDocWatch` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `vault.spineStats` | `vault:read` |  | `pluginBridgeHandlers.ts` |
+| `vault.updateManifest` | `vault:write` |  | `pluginBridgeHandlers.ts` |
+| `watch.clearInbox` | `watch:background` |  | `pluginCartridgeActions.ts` |
+| `watch.inbox` | `watch:background` |  | `pluginCartridgeActions.ts` |
+| `watch.register` | `watch:background` | A cartridge is an iframe: it cannot notice what arrived while closed. These four let it hand the host a declarative watch and read the result. The cartridge id  | `pluginCartridgeActions.ts` |
+| `watch.unregister` | `watch:background` |  | `pluginCartridgeActions.ts` |
+
+**Ungated actions (no permission gate — run on any loaded cartridge):** `getStatus`, `irinaHealthCheck`, `license.offer`, `license.status`, `permissions.refresh`, `sendPulse`, `shell.openExternal`, `state.get`, `state.set`, `vault.memoryStats`
+<!-- GENERATED:CARTRIDGE-ACTIONS:END -->
+
+**Rules:**
+
+- If an action is **not** in this table, it does not exist. Do not invent `vault.search`, `memory.add`, `chat.send`, etc. Use the exact names above.
+- Payload shapes follow the reference cartridge ([MnemoReader](https://github.com/Mnemosyne-OS/MnemoReader---MnemosyneOS)). When unsure, read the reference — do not guess a field name.
+
+## 4. Build & ship gotchas (each of these silently breaks a cartridge)
+
+- **`vite base: './'` + relative entrypoint.** The cartridge is served from a local path, not a server root. Absolute asset paths 404.
+- **Commit `dist/`.** The published cartridge serves the built `dist/`, not your source.
+- **No `window.confirm` / `window.alert` / `prompt()`.** They are blocked in the sandboxed iframe and return silently. Use a `dialog:*` action or your own in-app UI.
+- **No Node / Electron / `fs` / `process`.** Sandbox only. Everything host-side goes through `sdk.invoke`.
+- **Tests: keep the glob at `{ts,tsx}`.** `vite.config.ts` collects
+  `src/**/*.test.{ts,tsx}`. Narrowing it to `.test.ts` is the classic silent
+  failure here: a rendering test in a `.tsx` is then collected by NOBODY, the
+  suite stays green, the test counter does not move, and nothing announces that
+  a file was skipped. The same two extensions must stay in `tsconfig.json`'s
+  `exclude`, or that file rides into the shipping build instead.
+- **Nothing types your tests unless you run `pnpm typecheck`.** The build's
+  `tsc` excludes them on purpose, so shipping does not require vitest
+  installed. Lint rules are not a type checker. `pnpm typecheck` runs
+  `tsconfig.eslint.json`, which includes everything.
+
+- **`vault:write` is real and permanent.** Writes land in the user's memory and are shared with every future agent. The human governs: never write without the user's explicit intent, and write self-contained content.
+
+## 4b. The default look: liquid glass
+
+`src/glass.css` is imported once in `main.tsx` and gives every cartridge the same look. Keep it,
+and build on it rather than around it:
+
+- **Every button, field, select and textarea is glass by default.** Never a solid block of
+  colour. The main action of a screen gets `className="primary"`: the same glass, tinted green.
+- **A card or a panel** gets `className="glass"`.
+- **A choice among a few** (fewer than about ten) is a row of tiles, not a dropdown:
+  `className="chip-tile glass"`, plus `chosen` on the chosen one. It turns green with a check.
+- **A view switch** (sizes, modes) is drawn with icons, the way a file browser does (nine small
+  squares, four, one large), inside `className="segmented glass"` with `icon-btn` buttons. The
+  word goes in `title` and `aria-label`, not on screen.
+- **Use the whole width.** No `max-width` on a working panel: put the cards in `className="g-grid"`
+  (side by side as soon as two fit), and give a card that would sit alone on its row `full`.
+  At 375 px nothing may overflow sideways.
+- **A full-screen view** puts its bar at the top, its close button in the top-right corner, and
+  closes on a click anywhere. Only the controls stop the click.
+- The tokens (`--g-text`, `--g-chosen`, `--glass-fill`…) follow the host theme the OS broadcasts,
+  and fall back to a dark look on their own.
+
+## 5. Layer 2 app (only if you are a separate process — not a cartridge)
+
+```ts
+import { MnemoClientBrowser } from '@mnemosyne_os/sdk';
+const client = await MnemoClientBrowser.connect(); // ws://127.0.0.1:7799 — the OS must be running
+```
+
+- `MnemoClientBrowser` for browser / renderer / Electron-renderer (native WebSocket, zero Node deps).
+- `MnemoClient` for Node.js / Electron-main.
+- Each call is authenticated with a per-app JWT; only local / first-party origins are accepted.
+
+## 6. MCP server (only to plug an external AI assistant into memory)
+
+- Package: `@mnemosyne_os/mcp`. Requires the Mnemosyne app (Infinity Edition) running so the `7799` server is up.
+- Legacy `@mnemosyne-workspace/mcp-server` — **do not use.**
+
+## Packages
+
+| Package | Use it for | Version |
+|---|---|---|
+| `@mnemosyne_os/cartridge-sdk` | Cartridge (this guide) | 0.4.1 |
+| `@mnemosyne_os/sdk` | Layer 2 app | 1.5.5 |
+| `@mnemosyne_os/mcp` | MCP server | 1.9.0 |
+| `@mnemosyne_os/create-app` | Scaffold (`npm create @mnemosyne_os/app`) | 1.0.4 |
+| `@mnemosyne_os/forge` (CLI) | Publish / tooling | 1.4.7 |
+
+## Hard rules for the agent
+
+1. Use **only** the actions in §3. Never invent an API name or a payload field.
+2. Declare **only** the permissions you actually call.
+3. The core engine is **sealed** — describe its capabilities conceptually; never assume an internal implementation detail.
+4. Copy the boilerplate and read the [MnemoReader reference](https://github.com/Mnemosyne-OS/MnemoReader---MnemosyneOS) before writing from scratch.
+5. When a fact is not in this file, the reference cartridge, or the repo root `llms.txt` — stop and ask, do not guess.
+
+---
+
+*Further reading: the repo root `llms.txt` (developer entry point: surfaces + this same action table). The action table between the GENERATED markers is produced from the host registry in the source monorepo and synced here — do not edit it by hand.*
