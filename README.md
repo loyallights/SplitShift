@@ -1,6 +1,6 @@
 # SplitShift
 
-A Mnemosyne OS canvas cartridge for tracking time across clients and projects.
+A community cartridge for [Mnemosyne OS](https://mnemosyne-os.io), for tracking time across clients and projects. Built from the official cartridge starter; independently maintained.
 
 ## Features
 
@@ -119,4 +119,8 @@ complete the host integration checks described above.
 
 ## Sharing this package
 
-Includes the source, build, purple clock artwork, development documentation, and portable checks. It excludes dependency installations, backups, reference downloads, browser storage, and personal session records. Set repository metadata when the GitHub repository exists; no personal author name or email is configured in this package.
+Includes the source, build, purple clock artwork, development documentation, and portable checks. It excludes dependency installations, backups, reference downloads, browser storage, and personal session records. Repository metadata uses the public GitHub project URL; no personal email is configured in this package.
+
+## License and attribution
+
+MIT. See LICENSE and THIRD_PARTY_NOTICES.md. The original Mnemosyne starter copyright notice is retained. This license applies to SplitShift; it does not license the proprietary Mnemosyne desktop application.
