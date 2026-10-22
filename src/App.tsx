@@ -1,7 +1,12 @@
 import { saveReportToVault } from './vault-report';
 import { exportTextFile } from './csv-export';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { hosted, loadSnapshot, saveSnapshot, type Entry, type Snapshot } from './persistence';
+import { SessionStore } from './session-store';
+
+import InvoicePanel from './InvoicePanel';
+import { putInvoice, removeDraft } from './invoices';
+import BillingSharing from './BillingSharing';
 import './SplitShift.css';
 
 function duration(ms: number) {
@@ -35,18 +40,38 @@ export default function App() {
 }
 
 function SplitShiftScreen({ initial }: { initial: Snapshot }) {
+  const [store] = useState(() => new SessionStore(initial, saveSnapshot));
+  const { snapshot, status: saveStatus, error: storageError, busy } = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const { entries, rates, timer } = snapshot;
   const recoveredTimer = initial.timer;
-  const [client, setClient] = useState(recoveredTimer?.client ?? '');
-  const [project, setProject] = useState(recoveredTimer?.project ?? '');
-  const [description, setDescription] = useState(recoveredTimer?.description ?? '');
-  const [startedAt, setStartedAt] = useState<number | null>(recoveredTimer?.startedAt ?? null);
+  const [draftClient, setClient] = useState(recoveredTimer?.client ?? '');
+  const [draftProject, setProject] = useState(recoveredTimer?.project ?? '');
+  const [draftDescription, setDraftDescription] = useState(recoveredTimer?.description ?? '');
+  const client = timer?.client ?? draftClient;
+  const project = timer?.project ?? draftProject;
+  const description = timer?.description ?? draftDescription;
+  const startedAt = timer?.startedAt ?? null;
   const [now, setNow] = useState(Date.now());
-  const [entries, setEntries] = useState<Entry[]>(initial.entries);
-  const [storageError, setStorageError] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState('');
+
+  function run(action: () => Promise<unknown>) {
+    setActionError('');
+    void Promise.resolve().then(action).catch(error =>
+      setActionError(error instanceof Error ? error.message : String(error)));
+  }
+  function setDescription(value: string) {
+    if (timer) run(() => store.update(state => ({ ...state, timer: state.timer ? { ...state.timer, description: value } : null })));
+    else setDraftDescription(value);
+  }
+
+  useEffect(() => {
+    // Also migrates legacy preview storage to the atomic snapshot, if needed.
+    void store.retry().catch(() => undefined);
+  }, [store]);
 
   function deleteEntry(id: string) {
-    setEntries(previous => previous.filter(entry => entry.id !== id));
+    run(() => store.update(state => ({ ...state, entries: state.entries.filter(entry => entry.id !== id) })));
     setDeleteId(null);
   }
 
@@ -56,57 +81,21 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
   }, []);
 
   function start() {
-    if (!validRate) return;
-    setRunningRate(effectiveRate);
-    const timestamp = Date.now();
-    setNow(timestamp);
-    setStartedAt(timestamp);
+    run(async () => {
+      await store.start(client, project, description);
+      setDraftDescription('');
+      setNow(Date.now());
+    });
   }
 
   function stop() {
-    if (startedAt === null) return;
-    setEntries(previous => [{
-      id: crypto.randomUUID(),
-      client: client.trim(),
-      project: project.trim(),
-      description: description.trim(),
-      hourlyRate: runningRate,
-      startedAt,
-      endedAt: Date.now(),
-    }, ...previous]);
-    setStartedAt(null);
-    setDescription('');
-  }
-
-  const [rates, setRates] = useState<Record<string, string>>(initial.rates);
-
-  const [runningRate, setRunningRate] = useState<number | undefined>(
-    recoveredTimer?.hourlyRate
-  );
-  const [saveStatus, setSaveStatus] = useState('Saved');
-  const [saveAttempt, setSaveAttempt] = useState(0);
-  const latestSave = useRef(0);
-
-  useEffect(() => {
-    const generation = ++latestSave.current;
-    setSaveStatus('Saving...');
-    const snapshot: Snapshot = {
-      version: 1, entries, rates,
-      timer: startedAt === null ? null : {
-        client, project, description, startedAt, hourlyRate: runningRate,
-      },
-    };
-    saveSnapshot(snapshot).then(() => {
-      if (latestSave.current !== generation) return;
-      setStorageError('');
-      setSaveStatus('Saved');
-    }).catch(error => {
-      if (latestSave.current !== generation) return;
-      setSaveStatus('Not saved');
-      setStorageError(error instanceof Error ? error.message : String(error));
+    run(async () => {
+      const entry = await store.stop();
+      setClient(entry.client);
+      setProject(entry.project);
+      setDraftDescription('');
     });
-    return () => { latestSave.current += 1; };
-  }, [entries, rates, startedAt, client, project, description, runningRate, saveAttempt]);
+  }
 
   useEffect(() => {
     function warnUnsaved(event: BeforeUnloadEvent) {
@@ -128,7 +117,7 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
     (Number.isFinite(effectiveRate) && effectiveRate >= 0);
 
   function updateRate(key: string, value: string) {
-    setRates(previous => ({ ...previous, [key]: value }));
+    run(() => store.update(state => ({ ...state, rates: { ...state.rates, [key]: value } })));
   }
 
   const [manualStart, setManualStart] = useState('');
@@ -153,7 +142,7 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
       return;
     }
 
-    setEntries(previous => [{
+    run(() => store.update(state => ({ ...state, entries: [{
       id: crypto.randomUUID(),
       client: client.trim(),
       project: project.trim(),
@@ -161,7 +150,7 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
       hourlyRate: effectiveRate,
       startedAt: start,
       endedAt: end,
-    }, ...previous]);
+    }, ...state.entries] })));
     setManualStart('');
     setManualEnd('');
     setDescription('');
@@ -298,9 +287,16 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
   const reportAmount = reportRows.reduce((sum, row) => sum + row.amount, 0);
   const unpricedCount = reportRows.reduce((sum, row) => sum + row.unpriced, 0);
 
-  const [view, setView] = useState<'track' | 'entries' | 'reports'>('track');
+  const [view, setView] = useState<'track' | 'entries' | 'reports' | 'invoices'>('track');
   const [entryMode, setEntryMode] = useState<'timer' | 'manual'>('timer');
   const [search, setSearch] = useState('');
+  useEffect(() => {
+    if (!timer) return;
+    setClient(timer.client);
+    setProject(timer.project);
+    setDraftDescription('');
+    setEntryMode('timer');
+  }, [timer?.startedAt]);
   const todayEntries = entries.filter(entry => localDay(entry.startedAt) === localDay(now));
   const todayTime = todayEntries.reduce((sum, entry) => sum + entry.endedAt - entry.startedAt, 0);
   const todayAmount = todayEntries.reduce((sum, entry) => sum +
@@ -359,6 +355,7 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
         <button aria-pressed={view === 'track'} onClick={() => setView('track')}>Track time</button>
         <button aria-pressed={view === 'entries'} onClick={() => setView('entries')}>Entries <span className="ss-count">{entries.length}</span></button>
         <button aria-pressed={view === 'reports'} onClick={() => setView('reports')}>Reports</button>
+        <button aria-pressed={view === 'invoices'} onClick={() => setView('invoices')}>Invoices</button>
       </nav>
 
       {running && view !== 'track' && <div className="ss-running-banner">
@@ -367,8 +364,10 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
       </div>}
       {storageError && <div className="ss-alert" role="alert">
         <p>{storageError}</p><p>Keep this page open until your changes are saved.</p>
-        <button onClick={() => setSaveAttempt(value => value + 1)}>Retry saving</button>
+        <button disabled={busy} onClick={() => run(store.retry)}>Retry saving</button>
       </div>}
+      {actionError && <p className="ss-alert" role="alert">{actionError}</p>}
+
 
       {view === 'track' && <div className="ss-workspace">
         <section className="glass ss-panel">
@@ -387,15 +386,15 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
           <datalist id="ss-clients">{clients.map(value => <option key={value} value={value} />)}</datalist>
           <datalist id="ss-projects">{projects.map(value => <option key={value} value={value} />)}</datalist>
           <label className="ss-description-field">What are you working on? <span className="ss-optional">Optional</span>
-            <textarea value={description} rows={2} placeholder="A short note for your future self..."
+            <textarea value={description} disabled={busy} rows={2} placeholder="A short note for your future self..."
               onChange={event => setDescription(event.target.value)} /></label>
 
           <details className="ss-rates"><summary>Hourly rates <span>{effectiveRate === undefined ? 'Not set' : `${effectiveRate.toFixed(2)} / hr`}</span></summary>
             <div className="ss-form-grid">
               <label>Client default<input type="number" min="0" step="0.01" value={clientRate} placeholder="Optional"
-                disabled={running || !client.trim()} onChange={event => updateRate(clientKey, event.target.value)} /></label>
+                disabled={busy || running || !client.trim()} onChange={event => updateRate(clientKey, event.target.value)} /></label>
               <label>Project override<input type="number" min="0" step="0.01" value={projectRate} placeholder="Use client rate"
-                disabled={running || !client.trim() || !project.trim()} onChange={event => updateRate(projectKey, event.target.value)} /></label>
+                disabled={busy || running || !client.trim() || !project.trim()} onChange={event => updateRate(projectKey, event.target.value)} /></label>
             </div><p className="ss-help">Leave the project rate blank to use the client default. New sessions keep their applied rate.</p>
           </details>
           {!validRate && <p className="ss-alert" role="alert">Enter a valid, non-negative rate.</p>}
@@ -403,7 +402,7 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
           {entryMode === 'timer' ? <div className={`ss-timer ${running ? 'is-running' : ''}`}>
             <span className="ss-eyebrow">{running ? 'FOCUS TIME' : 'START SOMETHING GOOD'}</span>
             <output aria-label="Elapsed time">{duration(startedAt === null ? 0 : Math.max(0, now - startedAt))}</output>
-            <button className="primary ss-start" disabled={!running && (!client.trim() || !project.trim() || !validRate)}
+            <button className="primary ss-start" disabled={busy || Boolean(storageError) || (!running && (!client.trim() || !project.trim() || !validRate))}
               onClick={running ? stop : start}><span aria-hidden="true">{running ? '■' : '▶'}</span>{running ? 'Stop & save session' : 'Start timer'}</button>
             <p className="ss-help">{running ? 'Your timer will continue if you refresh this page.' : 'Choose a client and project to get started.'}</p>
           </div> : <div className="ss-manual">
@@ -412,7 +411,7 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
               <label>End date & time<input type="datetime-local" value={manualEnd}
                 onChange={event => setManualEnd(event.target.value)} /></label></div>
             {manualError && <p className="ss-alert" role="alert">{manualError}</p>}
-            <button className="primary" disabled={running || !client.trim() || !project.trim() || !validRate} onClick={saveManual}>Save manual entry</button>
+            <button className="primary" disabled={busy || running || !client.trim() || !project.trim() || !validRate} onClick={saveManual}>Save manual entry</button>
             <p className="ss-help">Dates and times use your local time zone.</p>
           </div>}
         </section>
@@ -460,6 +459,9 @@ function SplitShiftScreen({ initial }: { initial: Snapshot }) {
         {!invalidRange && !reportEntries.length && <div className="ss-empty"><h3>No sessions in this period</h3><p>Choose different dates or save a session.</p></div>}
         <p className="ss-help">{unpricedCount} sessions without rates. Amounts use one shared currency and are summed before rounding.</p>
       </section>}
+      <div hidden={view !== 'invoices'}><BillingSharing store={store} /><InvoicePanel snapshot={snapshot} busy={busy || saveStatus !== 'Saved'}
+        onSave={async invoice => { await store.update(state => putInvoice(state, invoice)); }}
+        onDelete={async id => { await store.update(state => removeDraft(state, id)); }} /></div>
       <footer className="ss-footer">{hosted ? 'Stored in dedicated SplitShift state in Mnemosyne' : 'Browser preview · Saved in this browser'} · Amounts use your chosen shared currency</footer>
     </main>
   );

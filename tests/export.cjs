@@ -20,6 +20,11 @@ const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarg
   assert.equal(calls[1][0], 'dialog.writeFile');
   assert.deepEqual(calls[1][1], { filePath: path, content: 'exact,csv\r\n' });
   console.log('PASS export writes exact content to selected folder with a unique filename');
+  calls = [];
+  const htmlPath = await exportTextFile('<!doctype html><title>Invoice</title>', 'invoice-INV-0001.html', 'text/html;charset=utf-8');
+  assert.match(htmlPath, /invoice-INV-0001-[0-9a-f-]+\.html$/);
+  assert.equal(calls[1][1].content, '<!doctype html><title>Invoice</title>');
+  console.log('PASS printable invoice export retains HTML extension and exact content');
   global.__sdk = { invoke: async action => action === 'dialog.selectFolder' ? 'C:\\Users\\ExampleUser' : { success: false, error: 'Disk unavailable' } };
   await assert.rejects(exportTextFile('csv', 'report.csv'), /Disk unavailable/);
   console.log('PASS host write failure is surfaced');

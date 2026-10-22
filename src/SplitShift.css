@@ -1,4 +1,27 @@
 :root { color-scheme: dark; }
+.ss-nav { max-width: 100%; flex-wrap: wrap; }
+.ss-invoices { display: grid; gap: 18px; }
+.ss-invoice-fields { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 18px; }
+.ss-invoice-fields legend { margin-bottom: 16px; color: var(--g-muted); font-size: 12px; }
+.ss-app select { width: 100%; min-width: 0; padding: 12px 13px; font-size: 13px; }
+.ss-app .ss-check { display: flex; flex-direction: row; align-items: flex-start; gap: 12px; font-weight: 400; }
+.ss-app .ss-check input { width: 18px; height: 18px; flex: 0 0 18px; margin-top: 3px; padding: 0; accent-color: var(--g-chosen); }
+.ss-invoice-session { display: flex; gap: 24px; justify-content: space-between; align-items: flex-start; padding: 18px 0; border-bottom: 1px solid var(--glass-edge); overflow-wrap: anywhere; }
+.ss-invoice-session > * { min-width: 0; }
+.ss-invoice-session > .ss-check { flex: 1; }
+.ss-invoice-description { display: block; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--g-muted); font-size: 12px; }
+.ss-invoice-price { display: grid; gap: 8px; flex: 0 0 150px; }
+.ss-invoice-total { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; padding: 20px 0; }
+.ss-invoice-total strong { font-size: 25px; font-weight: 550; }
+.ss-invoice-saved { display: flex; flex-wrap: wrap; gap: 8px; }
+.ss-invoice-saved button { white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.ss-invoice-saved button[aria-pressed="true"] { border-color: var(--g-chosen); }
+.ss-invoice-preview { padding: clamp(16px, 3vw, 32px); border: 1px solid var(--glass-edge); border-radius: 16px; display: grid; gap: 20px; }
+@media (max-width: 620px) {
+  .ss-invoice-session { flex-direction: column; gap: 12px; }
+  .ss-invoice-price { width: 100%; flex-basis: auto; }
+  .ss-invoice-preview .ss-form-grid { grid-template-columns: 1fr; }
+}
 :root[data-theme="light"] { color-scheme: light; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg-void, #101715); color: var(--g-text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.5; }

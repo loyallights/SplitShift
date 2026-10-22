@@ -1,11 +1,12 @@
 {
   "name": "@splitshift/app",
   "displayName": "SplitShift",
-  "version": "1.0.0",
-  "description": "Multi-client and project time tracking with rates, reports, and CSV export.",
+  "version": "1.1.0",
+  "description": "Client and project time tracking with invoices, optional due dates, CSV reports, and opt-in billing memory sharing.",
   "permissions": [
     "dialog:open",
-    "vault:write"
+    "vault:write",
+    "vault:read"
   ],
   "updateStrategy": "git",
   "entrypoints": {

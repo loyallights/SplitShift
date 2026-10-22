@@ -5,11 +5,23 @@ export type Entry = {
   startedAt: number; endedAt: number; hourlyRate?: number;
 };
 export type RunningTimer = Omit<Entry, 'id' | 'endedAt'>;
+export type Invoice = {
+  id: string; number: string; status: 'draft' | 'issued';
+  client: string; businessDetails: string; clientDetails: string;
+  issueDate: string; dueDate: string; currency: string; notes: string;
+  lines: (Entry & { hourlyRate: number })[];
+};
 export type Snapshot = {
   version: 1;
   entries: Entry[];
   rates: Record<string, string>;
   timer: RunningTimer | null;
+  invoices?: Invoice[];
+  billingRevision?: number;
+  billingSharing?: {
+    enabled: boolean; withdrawPending?: boolean; lastRevision?: number;
+    lastSyncedAt?: number; vault?: string;
+  };
 };
 
 export const hosted = window.parent !== window;
@@ -54,6 +66,54 @@ export function validateSnapshot(value: unknown): Snapshot {
   for (const rate of Object.values(value.rates)) {
     if (typeof rate !== 'string' || (rate !== '' && (!Number.isFinite(Number(rate)) || Number(rate) < 0))) {
       throw new Error('A saved rate could not be read. Saved data has not been overwritten.');
+    }
+  }
+  const revision = (item: unknown) => typeof item === 'number' && Number.isSafeInteger(item) && item >= 0;
+  if (value.billingRevision !== undefined && !revision(value.billingRevision)) throw new Error('Saved billing revision is invalid.');
+  if (value.billingSharing !== undefined) {
+    const sharing = value.billingSharing;
+    if (!object(sharing) || typeof sharing.enabled !== 'boolean' ||
+        (sharing.withdrawPending !== undefined && typeof sharing.withdrawPending !== 'boolean') ||
+        (sharing.lastRevision !== undefined && !revision(sharing.lastRevision)) ||
+        (sharing.lastSyncedAt !== undefined && !finite(sharing.lastSyncedAt)) ||
+        (sharing.vault !== undefined && typeof sharing.vault !== 'string')) {
+      throw new Error('Saved billing sharing settings are invalid. No data was overwritten.');
+    }
+  }
+  if (value.invoices !== undefined) {
+    if (!Array.isArray(value.invoices)) throw new Error('Saved invoices could not be read. No data was overwritten.');
+    const invoiceIds = new Set<string>();
+    const numbers = new Set<string>();
+    const assigned = new Set<string>();
+    const date = (text: unknown) => typeof text === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(text) &&
+      Number.isFinite(Date.parse(text)) && new Date(text).toISOString().slice(0, 10) === text;
+    for (const invoice of value.invoices) {
+      if (!object(invoice) || typeof invoice.id !== 'string' || !invoice.id || invoiceIds.has(invoice.id) ||
+          typeof invoice.number !== 'string' || !invoice.number.trim() || invoice.number.length > 80 || numbers.has(invoice.number.trim().toLowerCase()) ||
+          !['draft', 'issued'].includes(String(invoice.status)) || typeof invoice.client !== 'string' || !invoice.client.trim() ||
+          !['businessDetails', 'clientDetails', 'notes'].every(key => typeof invoice[key] === 'string' && (invoice[key] as string).length <= 10000) ||
+          typeof invoice.currency !== 'string' || !/^[A-Z]{3}$/.test(invoice.currency) ||
+          !date(invoice.issueDate) || !(invoice.dueDate === '' || (date(invoice.dueDate) && String(invoice.dueDate) >= String(invoice.issueDate))) ||
+          !Array.isArray(invoice.lines) || invoice.lines.length === 0) {
+        throw new Error('A saved invoice could not be read. No data was overwritten.');
+      }
+      invoiceIds.add(invoice.id);
+      numbers.add(invoice.number.trim().toLowerCase());
+      const digits = new Intl.NumberFormat('en', { style: 'currency', currency: invoice.currency }).resolvedOptions().maximumFractionDigits ?? 2;
+      let total = 0;
+      for (const line of invoice.lines) {
+        if (!timer(line) || typeof line.id !== 'string' || !line.id || assigned.has(line.id) ||
+            line.client.trim() !== invoice.client.trim() || !finite(line.endedAt) || line.endedAt < line.startedAt ||
+            Math.abs(line.endedAt) > 8640000000000000 || !finite(line.hourlyRate) || line.hourlyRate < 0) {
+          throw new Error('A saved invoice session could not be read. No data was overwritten.');
+        }
+        const amount = Math.round((line.endedAt - line.startedAt) / 3600000 * line.hourlyRate * 10 ** digits);
+        total += amount;
+        if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(total)) {
+          throw new Error('A saved invoice amount could not be read. No data was overwritten.');
+        }
+        assigned.add(line.id);
+      }
     }
   }
   return value as Snapshot;
